@@ -3,7 +3,7 @@
 Scout Engine - Stage 3: Daily Agent
 Generates top 20 leads daily with AI-generated outreach narratives and stores in database.
 """
- 
+
 import os
 import sys
 import json
@@ -217,8 +217,8 @@ Create a warm, conversational opening that:
 
 Keep it warm, professional, and 2-3 sentences max. No jargon, no sales speak."""
 
-model = genai.GenerativeModel("gemini-2.5-flash")
-response = model.generate_content(prompt, stream=False)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(prompt, stream=False)
         
         narrative = response.text.strip() if response.text else "Reach out about your property."
         return narrative
