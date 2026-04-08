@@ -220,7 +220,7 @@ Create a warm, conversational opening that:
 
 Keep it warm, professional, and 2-3 sentences max. No jargon, no sales speak."""
 
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt, stream=False)
         
         narrative = response.text.strip() if response.text else "Reach out about your property."
@@ -382,3 +382,4 @@ if __name__ == "__main__":
     client_id = sys.argv[1] if len(sys.argv) > 1 else "62960ae5-4e6f-4b03-82b0-1c3396271268"
     success = stage3_daily_agent(client_id)
     sys.exit(0 if success else 1)
+
