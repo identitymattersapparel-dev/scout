@@ -404,11 +404,7 @@ def stage2_deep_dive(client_id):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python stage2_deep_dive.py <client_id>")
-        print("Example: python stage2_deep_dive.py 62960ae5-4e6f-4b03-82b0-1c3396271268")
-        sys.exit(1)
-
-    client_id = sys.argv[1]
+    # Default to Brian's client_id if no argument provided
+    client_id = sys.argv[1] if len(sys.argv) > 1 else "62960ae5-4e6f-4b03-82b0-1c3396271268"
     success = stage2_deep_dive(client_id)
     sys.exit(0 if success else 1)
