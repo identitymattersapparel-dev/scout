@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""
+Scout Engine - Stage 2: Deep Dive
+Segments all leads from CSV into 8 high-value cohorts based on generic field mapping.
+Works for ANY CRM structure (not hardcoded to Brian's fields).
+"""
+ 
+import os
+import sys
+import json
+import csv
+from datetime import datetime, timedelta
+from pathlib import Path
+import re
+ 
+from supabase import create_client
+from dotenv import load_dotenv
+ 
+load_dotenv()
+ 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+ 
+# ============================================================================
+# SEGMENT DEFINITIONS (Generic - work for any CRM)
+# ============================================================================
+ 
+SEGMENTS = {
+    "1_warm_hot": {
+        "name": "Warm/Hot Leads",
+        "description": "Pre-qualified, actively in pipeline",
+        "criteria": "stage in ['A - Hot', 'B - Warm']",
+    },
+    "2_sphere_repeat": {
+        "name": "Past Clients / Sphere",
+        "description": "Repeat business goldmine",
+        "criteria": "stage in ['Past Client', 'Sphere', 'Active Client']",
+    },
+    "3_recently_active": {
+        "name": "Recently Active",
+        "description": "Touched < 90 days ago",
+        "criteria": "last_contact_date > (now - 90 days)",
+    },
+    "4_untouched": {
+        "name": "Untouched Leads",
+        "description": "Zero contact, lowest friction",
+        "criteria": "is_contacted == False AND has email AND has phone",
+    },
+    "5_milestone_8_11yr": {
+        "name": "8-11 Year Owners",
+        "description": "Equity + life change trigger",
+        "criteria": "purchase_date 8-11 years ago",
+    },
+    "6_milestone_10plus": {
+        "name": "10+ Year Owners",
+        "description": "Maximum equity, upgrade/downsize timing",
+        "criteria": "purchase_date 10+ years ago",
+    },
+    "7_cold_6months": {
+        "name": "Cold 6+ Months",
+        "description": "Dormant, reactivation opportunity",
+        "criteria": "stage == 'Cold 6+ Months' OR (last_contact_date < now - 180 days)",
+    },
+    "8_data_quality_issue": {
+        "name": "Data Quality Issue",
+        "description": "Missing critical fields (address, email, phone)",
+        "criteria": "missing address OR (missing email AND missing phone)",
+    },
+}
+ 
+ 
+def load_client_config(client_id):
+    """Load field mapping and config from Supabase."""
+    try:
+        response = supabase.table("client_configs").select("*").eq("client_id", str(client_id)).execute()
+        if not response.data or len(response.data) == 0:
+            print(f"❌ No config found for client_id: {client_id}")
+            return None
+        config = response.data[0]
+        print(f"✓ Loaded config: {config['client_name']}")
+        print(f"  Field mapping keys: {list(config['field_mapping'].keys())}")
+        return config
+    except Exception as e:
+        print(f"❌ Error loading config: {e}")
+        return None
+ 
+ 
+def download_csv_from_storage(bucket_name, file_path):
+    """Download CSV from Supabase Storage."""
+    try:
+        response = supabase.storage.from_(bucket_name).download(file_path)
+        return response.decode("utf-8")
+    except Exception as e:
+        print(f"❌ Error downloading CSV: {e}")
+        return None
+ 
+ 
+def parse_csv_to_dict(csv_content):
+    """Parse CSV content into list of dictionaries."""
+    lines = csv_content.split("\n")
+    reader = csv.DictReader(lines)
+    return list(reader)
+ 
+ 
+def extract_field(lead, field_mapping, field_key):
+    """
+    Extract a field value from lead dict using field_mapping.
+    Handles cases where field_mapping[field_key] might be:
+    - A column name (string)
+    - A list of column names (try in order)
+    - A regex pattern (for extraction from text)
+    """
+    field_spec = field_mapping.get(field_key)
+    if not field_spec:
+        return None
+ 
+    if isinstance(field_spec, str):
+        # Single column name
+        return lead.get(field_spec, "").strip() if field_spec in lead else None
+ 
+    elif isinstance(field_spec, list):
+        # List of column names - try each in order
+        for col_name in field_spec:
+            if col_name in lead and lead[col_name]:
+                return lead[col_name].strip()
+        return None
+ 
+    elif isinstance(field_spec, dict):
+        # Dictionary spec with 'column' and optional 'regex'
+        col_name = field_spec.get("column")
+        regex = field_spec.get("regex")
+        value = lead.get(col_name, "").strip() if col_name in lead else None
+ 
+        if value and regex:
+            match = re.search(regex, value)
+            if match:
+                return match.group(1) if match.groups() else match.group(0)
+        return value
+ 
+    return None
+ 
+ 
+def parse_date(date_str):
+    """Parse date string to datetime object."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str, "%m/%d/%Y")
+    except:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d")
+        except:
+            return None
+ 
+ 
+def calculate_years_owned(purchase_date_str):
+    """Calculate years owned from purchase date."""
+    if not purchase_date_str:
+        return None
+    purchase_date = parse_date(purchase_date_str)
+    if not purchase_date:
+        return None
+    today = datetime.now()
+    years = (today - purchase_date).days / 365.25
+    return round(years, 1)
+ 
+ 
+def days_since_contact(last_contact_str):
+    """Calculate days since last contact."""
+    if not last_contact_str:
+        return 999  # Treat missing as very old
+    last_contact = parse_date(last_contact_str)
+    if not last_contact:
+        return 999
+    today = datetime.now()
+    days = (today - last_contact).days
+    return days
+ 
+ 
+def assign_segment(lead, field_mapping):
+    """
+    Assign lead to segments based on generic criteria.
+    A lead can belong to multiple segments.
+    Return PRIMARY segment (highest priority).
+    """
+    now = datetime.now()
+    segments_assigned = []
+ 
+    # Extract key fields
+    stage = extract_field(lead, field_mapping, "stage") or ""
+    is_contacted = extract_field(lead, field_mapping, "is_contacted") or "No"
+    last_contact_str = extract_field(lead, field_mapping, "last_contact_date") or ""
+    purchase_date_str = extract_field(lead, field_mapping, "purchase_date") or ""
+    email = extract_field(lead, field_mapping, "email") or ""
+    phone = extract_field(lead, field_mapping, "phone") or ""
+    address = extract_field(lead, field_mapping, "address") or ""
+ 
+    # Normalize is_contacted
+    is_contacted_bool = is_contacted.lower() in ["yes", "true", "1"]
+ 
+    # ========== SEGMENT 1: WARM/HOT ==========
+    if any(x in stage.lower() for x in ["hot", "warm", "a -", "b -"]):
+        segments_assigned.append("1_warm_hot")
+ 
+    # ========== SEGMENT 2: SPHERE/REPEAT ==========
+    if any(x in stage.lower() for x in ["past client", "sphere", "active client"]):
+        segments_assigned.append("2_sphere_repeat")
+ 
+    # ========== SEGMENT 3: RECENTLY ACTIVE ==========
+    days_since = days_since_contact(last_contact_str)
+    if days_since < 90:
+        segments_assigned.append("3_recently_active")
+ 
+    # ========== SEGMENT 4: UNTOUCHED ==========
+    if not is_contacted_bool and email and phone:
+        segments_assigned.append("4_untouched")
+ 
+    # ========== SEGMENTS 5 & 6: MILESTONES (8-11yr, 10+yr) ==========
+    years_owned = calculate_years_owned(purchase_date_str)
+    if years_owned:
+        if 10 <= years_owned < 15:
+            segments_assigned.append("6_milestone_10plus")
+        elif 8 <= years_owned < 10:
+            segments_assigned.append("5_milestone_8_11yr")
+ 
+    # ========== SEGMENT 7: COLD 6+ MONTHS ==========
+    if "cold" in stage.lower() or days_since >= 180:
+        segments_assigned.append("7_cold_6months")
+ 
+    # ========== SEGMENT 8: DATA QUALITY ISSUE ==========
+    if not address or (not email and not phone):
+        segments_assigned.append("8_data_quality_issue")
+ 
+    # Return PRIMARY segment (first assigned, in priority order)
+    if segments_assigned:
+        return segments_assigned[0]
+    else:
+        return "unassigned"
+ 
+ 
+def load_previous_presentations(client_id):
+    """
+    Load previous lead presentations to avoid re-presenting same leads.
+    Match on: (client_id, email, phone, name)
+    """
+    try:
+        response = supabase.table("lead_presentations").select("lead_id").eq("client_id", str(client_id)).execute()
+        presented_lead_ids = {row["lead_id"] for row in response.data}
+        print(f"✓ Loaded {len(presented_lead_ids)} previous presentations for {client_id}")
+        return presented_lead_ids
+    except Exception as e:
+        print(f"⚠ Warning: Could not load previous presentations: {e}")
+        return set()
+ 
+ 
+def create_lead_id(name, email, phone):
+    """Create a unique lead ID from name, email, phone."""
+    components = [
+        (name or "").lower().replace(" ", ""),
+        (email or "").lower(),
+        (phone or "").replace("-", "").replace(" ", ""),
+    ]
+    return "|".join(components)
+ 
+ 
+def batch_insert_leads(client_id, leads_data):
+    """Insert leads into Supabase in batches."""
+    batch_size = 1000
+    total_inserted = 0
+ 
+    for i in range(0, len(leads_data), batch_size):
+        batch = leads_data[i : i + batch_size]
+        try:
+            response = supabase.table("leads").insert(batch).execute()
+            total_inserted += len(batch)
+            print(f"✓ Inserted batch {i // batch_size + 1}: {len(batch)} leads")
+        except Exception as e:
+            print(f"❌ Error inserting batch {i // batch_size + 1}: {e}")
+            # Continue with next batch
+            continue
+ 
+    return total_inserted
+ 
+ 
+def stage2_deep_dive(client_id):
+    """
+    Main Stage 2 Deep Dive workflow:
+    1. Load client config
+    2. Download CSV from Storage
+    3. Segment all leads
+    4. Store in `leads` table
+    """
+    print("\n" + "=" * 80)
+    print("STAGE 2: DEEP DIVE (Segmentation)")
+    print("=" * 80)
+ 
+    # Load config
+    config = load_client_config(client_id)
+    if not config:
+        return False
+ 
+    client_name = config["client_name"]
+    field_mapping = config["field_mapping"]
+    bucket_name = "clients"
+    storage_path = f"{client_name.lower().replace(' ', '-')}/raw_exports/"
+ 
+    # Find latest CSV file
+    print(f"\nSearching for CSV in: {bucket_name}/{storage_path}")
+ 
+    try:
+        files = supabase.storage.from_(bucket_name).list(storage_path)
+        csv_files = [f for f in files if f["name"].endswith(".csv")]
+        if not csv_files:
+            print(f"❌ No CSV files found in {storage_path}")
+            return False
+        csv_file = sorted(csv_files, key=lambda x: x["name"], reverse=True)[0]["name"]
+        csv_path = f"{storage_path}{csv_file}"
+        print(f"✓ Found CSV: {csv_path}")
+    except Exception as e:
+        print(f"❌ Error listing files: {e}")
+        return False
+ 
+    # Download CSV
+    csv_content = download_csv_from_storage(bucket_name, csv_path)
+    if not csv_content:
+        return False
+ 
+    # Parse CSV
+    leads = parse_csv_to_dict(csv_content)
+    print(f"✓ Parsed {len(leads):,} leads from CSV")
+ 
+    # Load previous presentations (to avoid duplicates)
+    previous_presentations = load_previous_presentations(client_id)
+ 
+    # Segment all leads
+    print("\nSegmenting leads...")
+    segment_counts = {}
+    leads_to_insert = []
+ 
+    for i, lead in enumerate(leads):
+        if (i + 1) % 1000 == 0:
+            print(f"  Processing {i + 1:,}/{len(leads):,}...")
+ 
+        # Extract lead fields
+        name = extract_field(lead, field_mapping, "name") or ""
+        email = extract_field(lead, field_mapping, "email") or ""
+        phone = extract_field(lead, field_mapping, "phone") or ""
+        address = extract_field(lead, field_mapping, "address") or ""
+ 
+        # Create lead ID and skip if already presented
+        lead_id = create_lead_id(name, email, phone)
+        if lead_id in previous_presentations:
+            continue
+ 
+        # Assign segment
+        segment = assign_segment(lead, field_mapping)
+        segment_counts[segment] = segment_counts.get(segment, 0) + 1
+ 
+        # Build lead record
+        lead_record = {
+            "client_id": str(client_id),
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "address": address,
+            "segment": segment,
+            "lead_id": lead_id,  # For tracking across CSV updates
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+ 
+        leads_to_insert.append(lead_record)
+ 
+    print(f"\n✓ Segmented {len(leads_to_insert):,} leads (skipped {len(leads) - len(leads_to_insert):,} re-presents)")
+ 
+    # Print segment summary
+    print("\nSegment Summary:")
+    print("-" * 60)
+    for segment_key in sorted(segment_counts.keys()):
+        count = segment_counts[segment_key]
+        segment_info = SEGMENTS.get(segment_key, {})
+        segment_name = segment_info.get("name", segment_key)
+        print(f"  {segment_name:30s} {count:6,} leads")
+ 
+    # Insert leads into database
+    print("\nInserting into database...")
+    total_inserted = batch_insert_leads(client_id, leads_to_insert)
+ 
+    print("\n" + "=" * 80)
+    print(f"STAGE 2 COMPLETE: {total_inserted:,} leads segmented and stored")
+    print("=" * 80)
+ 
+    return True
+ 
+ 
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python stage2_deep_dive.py <client_id>")
+        print("Example: python stage2_deep_dive.py 62960ae5-4e6f-4b03-82b0-1c3396271268")
+        sys.exit(1)
+ 
+    client_id = sys.argv[1]
+    success = stage2_deep_dive(client_id)
+    sys.exit(0 if success else 1)
