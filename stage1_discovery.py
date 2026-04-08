@@ -168,8 +168,8 @@ def stage1_discovery(client_id, storage_bucket, file_path):
 if __name__ == "__main__":
     # Brian's client ID
     BRIAN_CLIENT_ID = "62960ae5-4e6f-4b03-82b0-1c3396271268"
-    STORAGE_BUCKET = "bluefuse-brian-white"
-    FILE_PATH = "raw_exports/bluefuse_brian_white_raw_20260407.csv"
+    STORAGE_BUCKET = "clients"
+    FILE_PATH = "bluefuse-brian-white/raw_exports/bluefuse_brian_white_raw_20260407.csv"
     
     success = stage1_discovery(BRIAN_CLIENT_ID, STORAGE_BUCKET, FILE_PATH)
     exit(0 if success else 1)
