@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from supabase import create_client
 from dotenv import load_dotenv
-import google.genai as genai
+import google.generativeai as genai
 
 load_dotenv()
 
@@ -21,7 +21,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-client = genai.Client(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
 # ============================================================================
 # SEGMENT METADATA
@@ -217,10 +217,8 @@ Create a warm, conversational opening that:
 
 Keep it warm, professional, and 2-3 sentences max. No jargon, no sales speak."""
 
-        response = client.models.generate_content(
-            model="gemini-3-flash",
-            contents=prompt
-        )
+model = genai.GenerativeModel("gemini-2.5-flash")
+response = model.generate_content(prompt, stream=False)
         
         narrative = response.text.strip() if response.text else "Reach out about your property."
         return narrative
