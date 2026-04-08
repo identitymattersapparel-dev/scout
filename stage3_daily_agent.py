@@ -3,7 +3,7 @@
 Scout Engine - Stage 3: Daily Agent
 Generates top 20 leads daily with AI-generated outreach narratives and stores in database.
 """
-
+ 
 import os
 import sys
 import json
