@@ -218,7 +218,7 @@ Create a warm, conversational opening that:
 Keep it warm, professional, and 2-3 sentences max. No jargon, no sales speak."""
 
         response = client.models.generate_content(
-            model="gemini-1.5-pro",
+            model="gemini-3-flash",
             contents=prompt
         )
         
