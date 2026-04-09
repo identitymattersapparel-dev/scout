@@ -10,24 +10,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-SEGMENTS = {
-    "1_warm_hot": {"name": "Warm/Hot", "priority": 1},
-    "2_sphere_repeat": {"name": "Past Clients / Sphere", "priority": 2},
-    "3_recently_active": {"name": "Recently Active", "priority": 3},
-    "4_untouched": {"name": "Untouched", "priority": 4},
-    "5_milestone_8_11yr": {"name": "8-11 Year Owners", "priority": 5},
-    "6_milestone_10plus": {"name": "10+ Year Owners", "priority": 6},
-    "7_cold_6months": {"name": "Cold 6+ Months", "priority": 7},
-    "8_data_quality_issue": {"name": "Data Quality", "priority": 8},
-    "unassigned": {"name": "Unassigned", "priority": 9},
-}
 
 def load_client_config(client_id):
     res = supabase.table("client_configs").select("*").eq("client_id", str(client_id)).execute()
@@ -61,78 +48,39 @@ def select_leads_with_cooldown(client_id, segment, limit, cooldown_days):
     return res.data or []
 
 def generate_narrative(lead):
-    # SWITCHED TO v1 STABLE ENDPOINT
+    # FORCING V1 STABLE
     url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {'Content-Type': 'application/json'}
-    segment_name = SEGMENTS.get(lead.get("segment"), {}).get("name", "Unknown")
-    
-    payload = {
-        "contents": [{
-            "parts": [{
-                "text": f"Write a warm 2-sentence outreach for {lead.get('name')} at {lead.get('address')}. Segment: {segment_name}. No jargon."
-            }]
-        }]
-    }
-
+    payload = {"contents": [{"parts": [{"text": f"Write a 2-sentence property update for {lead.get('name')} at {lead.get('address')}."}]}]}
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200:
-            result = response.json()
-            return result['candidates'][0]['content']['parts'][0]['text'].strip()
-        else:
-            print(f"⚠️ API Error: {response.status_code} - {response.text}")
-            return f"Hi {lead.get('name')}, checking in regarding {lead.get('address')}."
-    except Exception as e:
-        print(f"⚠️ Request Error: {e}")
-        return "Checking in on your property value."
+        r = requests.post(url, json=payload, timeout=15)
+        if r.status_code == 200:
+            return r.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+        print(f"⚠️ Error: {r.status_code} - {r.text}")
+        return "Quick update on your home value."
+    except:
+        return "Checking in."
 
 def store_results(client_id, leads, client_name):
     today = datetime.now().strftime("%Y-%m-%d")
-    briefing = {
-        "client_id": str(client_id), "client_name": client_name,
-        "briefing_date": today, "lead_count": len(leads),
-        "leads_json": json.dumps(leads), "created_at": datetime.now().isoformat()
-    }
+    briefing = {"client_id": str(client_id), "client_name": client_name, "briefing_date": today, "lead_count": len(leads), "leads_json": json.dumps(leads), "created_at": datetime.now().isoformat()}
     supabase.table("daily_briefings").upsert(briefing, on_conflict="client_id,briefing_date").execute()
-    
-    logs = [{
-        "client_id": str(client_id), "lead_id": l.get("lead_id"),
-        "presented_date": today, "segment": l.get("segment"),
-        "narrative": l.get("narrative"), "status": "sent"
-    } for l in logs if (l := l)] # Safety check
-    
-    # Using specific log construction to ensure narrative is captured
-    final_logs = []
-    for l in leads:
-        final_logs.append({
-            "client_id": str(client_id), "lead_id": l.get("lead_id"),
-            "presented_date": today, "segment": l.get("segment"),
-            "narrative": l.get("narrative"), "status": "sent"
-        })
-    supabase.table("lead_presentations").upsert(final_logs, on_conflict="client_id,lead_id,presented_date").execute()
+    logs = [{"client_id": str(client_id), "lead_id": l.get("lead_id"), "presented_date": today, "segment": l.get("segment"), "narrative": l.get("narrative"), "status": "sent"} for l in leads]
+    supabase.table("lead_presentations").upsert(logs, on_conflict="client_id,lead_id,presented_date").execute()
 
 def main(client_id):
     print(f"\n{'='*25} STAGE 3: DAILY AGENT {'='*25}")
     config = load_client_config(client_id)
     if not config: return
-    
     cooldown = config.get("cooldown_days", 90)
     print(f"✓ Config Loaded: {config['client_name']} (Cooldown: {cooldown} days)")
-    
-    counts = get_segment_counts(client_id)
-    alloc = calculate_proportional_allocation(counts)
-    
+    alloc = calculate_proportional_allocation(get_segment_counts(client_id))
     top_leads = []
-    print("\n✓ Selecting Leads...")
     for seg, lim in alloc.items():
-        batch = select_leads_with_cooldown(client_id, seg, lim, cooldown)
-        top_leads.extend(batch)
-
-    print(f"\n✓ Generating Narratives (Stable v1 API)...")
+        top_leads.extend(select_leads_with_cooldown(client_id, seg, lim, cooldown))
+    print(f"\n✓ Generating Narratives...")
     for i, lead in enumerate(top_leads, 1):
         lead['narrative'] = generate_narrative(lead)
         print(f"  [{i}/{len(top_leads)}] {lead.get('name')}")
-
     store_results(client_id, top_leads, config.get("client_name"))
     print(f"\n{'='*22} STAGE 3 COMPLETE {'='*22}\n")
 
