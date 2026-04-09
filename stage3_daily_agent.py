@@ -48,13 +48,14 @@ def generate_narrative(lead):
     segment_key = lead.get('segment', 'General')
     strategy = SEGMENT_STRATEGIES.get(segment_key, "Professional and concise.")
     
-    prompt = (
-        f"You are Brian White, a highly professional real estate advisor. Write a 2-sentence outreach to {lead.get('name')} "
+prompt = (
+        f"You are Brian White, a professional real estate advisor. Write a 2-sentence outreach to {lead.get('name')} "
         f"regarding their property at {lead.get('address')}. "
         f"Context: Their lead segment is '{segment_key}'. "
         f"Strategy: {strategy} "
-        f"Constraint: Act as a 'Trusted Advisor'. DO NOT use sales cliches, urgency tactics, or words like 'hot', 'fire', or 'exploding'. "
-        f"Focus on explaining the specific reason for this touchpoint. Keep it under 40 words."
+        f"Constraint: Act as a 'Trusted Advisor'. DO NOT invent specific statistics, percentages (e.g., '8%'), or sales prices. "
+        f"Focus on professional observation of market trends or the lead's activity. "
+        f"Keep it under 40 words. No sales cliches or hype."
     )
 
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
