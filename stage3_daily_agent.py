@@ -2,7 +2,7 @@
 """
 Scout Engine - Stage 3: Daily Agent
 Generates top 20 leads daily with AI-generated outreach narratives.
-Includes 90-day cooldown logic and Supabase upsert handling.
+Includes dynamic cooldown logic and Supabase upsert handling.
 """
 
 import os
@@ -23,7 +23,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-# We initialize the client without specifying a version to let it use stable defaults
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ============================================================================
@@ -45,9 +44,7 @@ SEGMENTS = {
 def load_client_config(client_id):
     try:
         response = supabase.table("client_configs").select("*").eq("client_id", str(client_id)).execute()
-        if not response.data:
-            print(f"❌ No config found for client_id: {client_id}")
-            return None
+        if not response.data: return None
         return response.data[0]
     except Exception as e:
         print(f"❌ Error loading config: {e}")
@@ -75,7 +72,7 @@ def calculate_proportional_allocation(segment_counts, total_target=20):
         allocation[biggest_segment] += diff
     return allocation
 
-def select_leads_with_cooldown(client_id, segment, limit, cooldown_days=90):
+def select_leads_with_cooldown(client_id, segment, limit, cooldown_days):
     if limit <= 0: return []
     cutoff_date = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
     try:
@@ -95,21 +92,19 @@ def select_leads_with_cooldown(client_id, segment, limit, cooldown_days=90):
         return []
 
 def generate_narrative(lead):
-    """Generate AI narrative using the correct model identifier for the new SDK."""
+    """Generate AI narrative using the explicit production model ID."""
     try:
         segment_name = SEGMENTS.get(lead.get("segment"), {}).get("name", "Unknown")
         prompt = f"""Write a warm 2-sentence outreach for {lead.get('name')} regarding their property at {lead.get('address')}. 
         Segment: {segment_name}. No sales jargon. Offer value or market insight."""
 
-        # Use 'gemini-1.5-flash' but without 'models/' prefix 
-        # The new SDK is picky about the naming convention in certain environments
+        # Using 'gemini-1.5-flash-latest' to ensure we hit the production endpoint
         response = ai_client.models.generate_content(
-            model="gemini-1.5-flash", 
+            model="gemini-1.5-flash-latest", 
             contents=prompt
         )
         return response.text.strip() if response.text else "Checking in on your property value."
     except Exception as e:
-        # If it still fails, we log the exact error to see the SDK's preferred format
         print(f"⚠️ Gemini Error for {lead.get('name')}: {e}")
         return f"Hi {lead.get('name')}, I have a quick update on the local market for you."
 
@@ -161,9 +156,12 @@ def stage3_daily_agent(client_id):
     allocation = calculate_proportional_allocation(segment_counts)
     
     top_leads = []
+    print("\n✓ Selecting Leads...")
     for segment, limit in allocation.items():
         leads = select_leads_with_cooldown(client_id, segment, limit, cooldown)
         top_leads.extend(leads)
+        if leads:
+            print(f"  - {segment:25s}: {len(leads)} leads selected")
 
     print(f"\n✓ Generating Narratives...")
     for i, lead in enumerate(top_leads, 1):
