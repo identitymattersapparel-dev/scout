@@ -1,10 +1,3 @@
-Here is the updated file. I have made two targeted changes:
-
-Selection Logic (Line 79): Hardened the query to use gte (Greater Than or Equal to) for the cooldown check. This ensures that any leads added "today" are immediately seen as blocked for any subsequent runs on the same day.
-
-Voice & Tone (Lines 44-55): Rewrote the SEGMENT_STRATEGIES and the generate_narrative prompt to enforce the "Trusted Advisor" persona and explicitly ban "hot market" or "fire" language.
-
-Python
 #!/usr/bin/env python3
 import os, sys, json, requests, math
 from datetime import datetime, timedelta
