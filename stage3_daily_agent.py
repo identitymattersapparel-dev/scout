@@ -61,8 +61,8 @@ def select_leads_with_cooldown(client_id, segment, limit, cooldown_days):
     return res.data or []
 
 def generate_narrative(lead):
-    """Direct REST call to Gemini - No SDK involved to avoid 404s."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # SWITCHED TO v1 STABLE ENDPOINT
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     headers = {'Content-Type': 'application/json'}
     segment_name = SEGMENTS.get(lead.get("segment"), {}).get("name", "Unknown")
     
@@ -75,14 +75,13 @@ def generate_narrative(lead):
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        # Handle potential API errors directly
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             result = response.json()
             return result['candidates'][0]['content']['parts'][0]['text'].strip()
         else:
             print(f"⚠️ API Error: {response.status_code} - {response.text}")
-            return f"Hi {lead.get('name')}, thinking of your property at {lead.get('address')}."
+            return f"Hi {lead.get('name')}, checking in regarding {lead.get('address')}."
     except Exception as e:
         print(f"⚠️ Request Error: {e}")
         return "Checking in on your property value."
@@ -100,8 +99,17 @@ def store_results(client_id, leads, client_name):
         "client_id": str(client_id), "lead_id": l.get("lead_id"),
         "presented_date": today, "segment": l.get("segment"),
         "narrative": l.get("narrative"), "status": "sent"
-    } for l in leads]
-    supabase.table("lead_presentations").upsert(logs, on_conflict="client_id,lead_id,presented_date").execute()
+    } for l in logs if (l := l)] # Safety check
+    
+    # Using specific log construction to ensure narrative is captured
+    final_logs = []
+    for l in leads:
+        final_logs.append({
+            "client_id": str(client_id), "lead_id": l.get("lead_id"),
+            "presented_date": today, "segment": l.get("segment"),
+            "narrative": l.get("narrative"), "status": "sent"
+        })
+    supabase.table("lead_presentations").upsert(final_logs, on_conflict="client_id,lead_id,presented_date").execute()
 
 def main(client_id):
     print(f"\n{'='*25} STAGE 3: DAILY AGENT {'='*25}")
@@ -120,7 +128,7 @@ def main(client_id):
         batch = select_leads_with_cooldown(client_id, seg, lim, cooldown)
         top_leads.extend(batch)
 
-    print(f"\n✓ Generating Narratives (Direct REST)...")
+    print(f"\n✓ Generating Narratives (Stable v1 API)...")
     for i, lead in enumerate(top_leads, 1):
         lead['narrative'] = generate_narrative(lead)
         print(f"  [{i}/{len(top_leads)}] {lead.get('name')}")
