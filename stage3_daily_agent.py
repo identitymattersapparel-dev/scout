@@ -41,9 +41,9 @@ SEGMENT_STRATEGIES = {
 }
 
 def generate_narrative(lead):
-    """Uses Gemini 1.5 Flash to write a contextual 2-sentence update."""
-    # Production Endpoint
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    """Uses Gemini 2.5 Flash to write a contextual 2-sentence update."""
+    # Corrected Model Endpoint for 2.5 Flash
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     segment_key = lead.get('segment', 'General')
     strategy = SEGMENT_STRATEGIES.get(segment_key, "Professional and concise.")
@@ -70,7 +70,6 @@ def generate_narrative(lead):
 
 def get_weighted_leads(client_id, cooldown_days, total_target=20):
     """Pulls a balanced sample across segments, respecting the cooldown."""
-    # Logic Fix: Using GTE ensures anyone added 'today' is caught in the exclusion for second runs.
     cutoff = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
     
     print(f"--- Strategic Allocation ({total_target} leads) ---")
@@ -124,7 +123,7 @@ def main(client_id, total_leads=20):
         return
 
     # 2. Narrative Generation
-    print(f"✓ Generating {len(top_leads)} Narratives via Gemini 1.5 Flash...")
+    print(f"✓ Generating {len(top_leads)} Narratives via Gemini 2.5 Flash...")
     for i, lead in enumerate(top_leads, 1):
         lead['narrative'] = generate_narrative(lead)
         print(f"  [{i}/{len(top_leads)}] {lead.get('name')} ({lead.get('segment')})")
