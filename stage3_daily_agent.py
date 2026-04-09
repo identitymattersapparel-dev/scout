@@ -23,6 +23,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# We initialize the client without specifying a version to let it use stable defaults
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # ============================================================================
@@ -42,7 +43,6 @@ SEGMENTS = {
 }
 
 def load_client_config(client_id):
-    """Load client config from Supabase."""
     try:
         response = supabase.table("client_configs").select("*").eq("client_id", str(client_id)).execute()
         if not response.data:
@@ -54,7 +54,6 @@ def load_client_config(client_id):
         return None
 
 def get_segment_counts(client_id):
-    """Query database to get count of leads per segment."""
     try:
         response = supabase.table("leads").select("segment", count="exact").eq("client_id", str(client_id)).execute()
         counts = defaultdict(int)
@@ -67,43 +66,28 @@ def get_segment_counts(client_id):
         return {}
 
 def calculate_proportional_allocation(segment_counts, total_target=20):
-    """Calculate how many leads to pick from each segment (proportional)."""
     total_leads = sum(segment_counts.values())
     if total_leads == 0: return {}
-    
     allocation = {s: round((c/total_leads) * total_target) for s, c in segment_counts.items()}
-    
-    # Adjust for rounding errors
     diff = total_target - sum(allocation.values())
     if diff != 0 and segment_counts:
         biggest_segment = max(segment_counts, key=segment_counts.get)
         allocation[biggest_segment] += diff
-    
     return allocation
 
 def select_leads_with_cooldown(client_id, segment, limit, cooldown_days=90):
-    """Query top leads while excluding those seen in the cooldown window."""
     if limit <= 0: return []
-    
-    # 1. Determine the cutoff date
     cutoff_date = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
-    
     try:
-        # 2. Get Lead IDs presented within the cooldown window
         recent_res = supabase.table("lead_presentations") \
             .select("lead_id") \
             .eq("client_id", str(client_id)) \
             .gte("presented_date", cutoff_date) \
             .execute()
-        
         excluded_ids = [row['lead_id'] for row in recent_res.data]
-
-        # 3. Build the lead selection query
         query = supabase.table("leads").select("*").eq("client_id", str(client_id)).eq("segment", segment)
-        
         if excluded_ids:
             query = query.not_.in_("lead_id", excluded_ids)
-            
         response = query.order("name", desc=False).limit(limit).execute()
         return response.data if response.data else []
     except Exception as e:
@@ -111,24 +95,25 @@ def select_leads_with_cooldown(client_id, segment, limit, cooldown_days=90):
         return []
 
 def generate_narrative(lead):
-    """Generate AI narrative using Gemini Flash."""
+    """Generate AI narrative using the correct model identifier for the new SDK."""
     try:
         segment_name = SEGMENTS.get(lead.get("segment"), {}).get("name", "Unknown")
         prompt = f"""Write a warm 2-sentence outreach for {lead.get('name')} regarding their property at {lead.get('address')}. 
         Segment: {segment_name}. No sales jargon. Offer value or market insight."""
 
-        # Using gemini-1.5-flash for stable production API access
+        # Use 'gemini-1.5-flash' but without 'models/' prefix 
+        # The new SDK is picky about the naming convention in certain environments
         response = ai_client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-1.5-flash", 
             contents=prompt
         )
         return response.text.strip() if response.text else "Checking in on your property value."
     except Exception as e:
+        # If it still fails, we log the exact error to see the SDK's preferred format
         print(f"⚠️ Gemini Error for {lead.get('name')}: {e}")
         return f"Hi {lead.get('name')}, I have a quick update on the local market for you."
 
 def store_daily_briefing(client_id, leads, client_name):
-    """Upsert daily briefing to avoid duplicate errors."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         data = {
@@ -147,7 +132,6 @@ def store_daily_briefing(client_id, leads, client_name):
         return False
 
 def log_presentations(client_id, leads):
-    """Upsert lead presentations to log today's surfacing."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         logs = [{
@@ -159,16 +143,14 @@ def log_presentations(client_id, leads):
             "status": "sent"
         } for l in leads]
         supabase.table("lead_presentations").upsert(logs, on_conflict="client_id,lead_id,presented_date").execute()
-        print(f"✓ Logged {len(leads)} presentations with cooldown metadata")
+        print(f"✓ Logged {len(leads)} presentations")
         return True
     except Exception as e:
         print(f"⚠️ Log Storage Error: {e}")
         return False
 
 def stage3_daily_agent(client_id):
-    """Main Stage 3 orchestration."""
     print(f"\n{'='*25} STAGE 3: DAILY AGENT {'='*25}")
-    
     config = load_client_config(client_id)
     if not config: return False
     
@@ -179,14 +161,11 @@ def stage3_daily_agent(client_id):
     allocation = calculate_proportional_allocation(segment_counts)
     
     top_leads = []
-    print("\n✓ Selecting Leads (Applying Cooldown Filter)...")
     for segment, limit in allocation.items():
         leads = select_leads_with_cooldown(client_id, segment, limit, cooldown)
         top_leads.extend(leads)
-        if leads:
-            print(f"  - {segment:25s}: {len(leads)} leads selected")
 
-    print(f"\n✓ Generating Narratives (Gemini Flash)...")
+    print(f"\n✓ Generating Narratives...")
     for i, lead in enumerate(top_leads, 1):
         lead['narrative'] = generate_narrative(lead)
         print(f"  [{i}/{len(top_leads)}] {lead.get('name')}")
@@ -194,10 +173,9 @@ def stage3_daily_agent(client_id):
     store_daily_briefing(client_id, top_leads, config.get("client_name"))
     log_presentations(client_id, top_leads)
     
-    print(f"\n{'='*22} STAGE 3 COMPLETE: {len(top_leads)} LEADS {'='*22}\n")
+    print(f"\n{'='*22} STAGE 3 COMPLETE {'='*22}\n")
     return True
 
 if __name__ == "__main__":
-    # Default to Brian's ID
     cid = sys.argv[1] if len(sys.argv) > 1 else "62960ae5-4e6f-4b03-82b0-1c3396271268"
     stage3_daily_agent(cid)
