@@ -1,22 +1,33 @@
 #!/usr/bin/env python3
+"""
+Scout Engine - Stage 3: Daily Agent
+Generates top 20 leads daily with AI-generated outreach narratives.
+Includes 90-day cooldown logic and Supabase upsert handling.
+"""
+
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 from supabase import create_client
 from dotenv import load_dotenv
-from google import genai # Switched to the new recommended package
+from google import genai
 
 load_dotenv()
 
+# Environment Setup
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-client = genai.Client(api_key=GEMINI_API_KEY) # New client initialization
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ============================================================================
+# SEGMENT METADATA
+# ============================================================================
 
 SEGMENTS = {
     "1_warm_hot": {"name": "Warm/Hot", "emoji": "🔥", "priority": 1},
@@ -31,60 +42,92 @@ SEGMENTS = {
 }
 
 def load_client_config(client_id):
+    """Load client config from Supabase."""
     try:
         response = supabase.table("client_configs").select("*").eq("client_id", str(client_id)).execute()
-        if not response.data: return None
+        if not response.data:
+            print(f"❌ No config found for client_id: {client_id}")
+            return None
         return response.data[0]
     except Exception as e:
-        print(f"❌ Config Error: {e}")
+        print(f"❌ Error loading config: {e}")
         return None
 
 def get_segment_counts(client_id):
+    """Query database to get count of leads per segment."""
     try:
         response = supabase.table("leads").select("segment", count="exact").eq("client_id", str(client_id)).execute()
         counts = defaultdict(int)
         for row in response.data:
-            counts[row.get("segment", "unassigned")] += 1
+            segment = row.get("segment", "unassigned")
+            counts[segment] += 1
         return dict(counts)
     except Exception as e:
-        print(f"❌ Segment Error: {e}")
+        print(f"❌ Error loading segment counts: {e}")
         return {}
 
 def calculate_proportional_allocation(segment_counts, total_target=20):
+    """Calculate how many leads to pick from each segment (proportional)."""
     total_leads = sum(segment_counts.values())
     if total_leads == 0: return {}
+    
     allocation = {s: round((c/total_leads) * total_target) for s, c in segment_counts.items()}
+    
+    # Adjust for rounding errors
     diff = total_target - sum(allocation.values())
     if diff != 0 and segment_counts:
-        allocation[max(segment_counts, key=segment_counts.get)] += diff
+        biggest_segment = max(segment_counts, key=segment_counts.get)
+        allocation[biggest_segment] += diff
+    
     return allocation
 
-def select_leads_from_segment(client_id, segment, limit):
+def select_leads_with_cooldown(client_id, segment, limit, cooldown_days=90):
+    """Query top leads while excluding those seen in the cooldown window."""
     if limit <= 0: return []
+    
+    # 1. Determine the cutoff date
+    cutoff_date = (datetime.now() - timedelta(days=cooldown_days)).strftime("%Y-%m-%d")
+    
     try:
-        res = supabase.table("leads").select("*").eq("client_id", str(client_id)).eq("segment", segment).limit(limit).execute()
-        return res.data or []
+        # 2. Get Lead IDs presented within the cooldown window
+        recent_res = supabase.table("lead_presentations") \
+            .select("lead_id") \
+            .eq("client_id", str(client_id)) \
+            .gte("presented_date", cutoff_date) \
+            .execute()
+        
+        excluded_ids = [row['lead_id'] for row in recent_res.data]
+
+        # 3. Build the lead selection query
+        query = supabase.table("leads").select("*").eq("client_id", str(client_id)).eq("segment", segment)
+        
+        if excluded_ids:
+            query = query.not_.in_("lead_id", excluded_ids)
+            
+        response = query.order("name", desc=False).limit(limit).execute()
+        return response.data if response.data else []
     except Exception as e:
-        print(f"⚠️ Query Error: {e}")
+        print(f"⚠️ Cooldown Filter Error for {segment}: {e}")
         return []
 
 def generate_narrative(lead):
-    """Uses Gemini 3 Flash via the new google-genai package."""
+    """Generate AI narrative using Gemini 3 Flash."""
     try:
-        prompt = f"Write a 2-sentence warm outreach to {lead.get('name')} regarding their property at {lead.get('address')}. Segment: {lead.get('segment')}. No sales jargon."
-        
-        # Using the standard model string with the new SDK
-        response = client.models.generate_content(
-            model="gemini-3-flash", 
+        segment_name = SEGMENTS.get(lead.get("segment"), {}).get("name", "Unknown")
+        prompt = f"""Write a warm 2-sentence outreach for {lead.get('name')} regarding their property at {lead.get('address')}. 
+        Segment: {segment_name}. No sales jargon. Offer value or market insight."""
+
+        response = ai_client.models.generate_content(
+            model="gemini-3-flash",
             contents=prompt
         )
-        return response.text.strip()
+        return response.text.strip() if response.text else "Checking in on your property value."
     except Exception as e:
-        print(f"⚠️ Gemini Error: {e}")
-        return f"Hi {lead.get('name')}, checking in on your property interest."
+        print(f"⚠️ Gemini Error for {lead.get('name')}: {e}")
+        return f"Hi {lead.get('name')}, I have a quick update on the local market for you."
 
 def store_daily_briefing(client_id, leads, client_name):
-    """Uses upsert to avoid duplicate key errors on the same date."""
+    """Upsert daily briefing to avoid duplicate errors."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         data = {
@@ -95,15 +138,15 @@ def store_daily_briefing(client_id, leads, client_name):
             "leads_json": json.dumps(leads),
             "created_at": datetime.now().isoformat(),
         }
-        # .upsert() replaces the record if (client_id, briefing_date) already exists
         supabase.table("daily_briefings").upsert(data, on_conflict="client_id,briefing_date").execute()
+        print(f"✓ Daily briefing saved (Upserted for {today})")
         return True
     except Exception as e:
-        print(f"⚠️ Briefing Error: {e}")
+        print(f"⚠️ Briefing Storage Error: {e}")
         return False
 
 def log_presentations(client_id, leads):
-    """Uses upsert to prevent unique constraint violations on leads."""
+    """Upsert lead presentations to log today's surfacing."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         logs = [{
@@ -115,32 +158,45 @@ def log_presentations(client_id, leads):
             "status": "sent"
         } for l in leads]
         supabase.table("lead_presentations").upsert(logs, on_conflict="client_id,lead_id,presented_date").execute()
+        print(f"✓ Logged {len(leads)} presentations with cooldown metadata")
         return True
     except Exception as e:
-        print(f"⚠️ Log Error: {e}")
+        print(f"⚠️ Log Storage Error: {e}")
         return False
 
 def stage3_daily_agent(client_id):
-    print(f"\n{'='*20} DAILY AGENT RUN {'='*20}")
+    """Main Stage 3 orchestration."""
+    print(f"\n{'='*25} STAGE 3: DAILY AGENT {'='*25}")
+    
     config = load_client_config(client_id)
     if not config: return False
     
-    counts = get_segment_counts(client_id)
-    alloc = calculate_proportional_allocation(counts)
+    cooldown = config.get("cooldown_days", 90)
+    print(f"✓ Config Loaded: {config['client_name']} (Cooldown: {cooldown} days)")
+    
+    segment_counts = get_segment_counts(client_id)
+    allocation = calculate_proportional_allocation(segment_counts)
     
     top_leads = []
-    for seg, lim in alloc.items():
-        top_leads.extend(select_leads_from_segment(client_id, seg, lim))
-    
-    for lead in top_leads:
+    print("\n✓ Selecting Leads (Applying Cooldown Filter)...")
+    for segment, limit in allocation.items():
+        leads = select_leads_with_cooldown(client_id, segment, limit, cooldown)
+        top_leads.extend(leads)
+        if leads:
+            print(f"  - {segment:25s}: {len(leads)} leads selected")
+
+    print(f"\n✓ Generating Narratives (Gemini 3 Flash)...")
+    for i, lead in enumerate(top_leads, 1):
         lead['narrative'] = generate_narrative(lead)
-        print(f"✓ Narrated: {lead.get('name')}")
+        print(f"  [{i}/{len(top_leads)}] {lead.get('name')}")
 
     store_daily_briefing(client_id, top_leads, config.get("client_name"))
     log_presentations(client_id, top_leads)
-    print(f"{'='*20} RUN COMPLETE {'='*20}")
+    
+    print(f"\n{'='*22} STAGE 3 COMPLETE: {len(top_leads)} LEADS {'='*22}\n")
     return True
 
 if __name__ == "__main__":
+    # Default to Brian's ID
     cid = sys.argv[1] if len(sys.argv) > 1 else "62960ae5-4e6f-4b03-82b0-1c3396271268"
     stage3_daily_agent(cid)
