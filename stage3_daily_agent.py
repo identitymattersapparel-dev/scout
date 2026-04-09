@@ -111,12 +111,13 @@ def select_leads_with_cooldown(client_id, segment, limit, cooldown_days=90):
         return []
 
 def generate_narrative(lead):
-    """Generate AI narrative using Gemini 3 Flash."""
+    """Generate AI narrative using Gemini Flash."""
     try:
         segment_name = SEGMENTS.get(lead.get("segment"), {}).get("name", "Unknown")
         prompt = f"""Write a warm 2-sentence outreach for {lead.get('name')} regarding their property at {lead.get('address')}. 
         Segment: {segment_name}. No sales jargon. Offer value or market insight."""
 
+        # Using gemini-1.5-flash for stable production API access
         response = ai_client.models.generate_content(
             model="gemini-1.5-flash",
             contents=prompt
@@ -185,7 +186,7 @@ def stage3_daily_agent(client_id):
         if leads:
             print(f"  - {segment:25s}: {len(leads)} leads selected")
 
-    print(f"\n✓ Generating Narratives (Gemini 3 Flash)...")
+    print(f"\n✓ Generating Narratives (Gemini Flash)...")
     for i, lead in enumerate(top_leads, 1):
         lead['narrative'] = generate_narrative(lead)
         print(f"  [{i}/{len(top_leads)}] {lead.get('name')}")
