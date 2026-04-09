@@ -118,7 +118,7 @@ def generate_narrative(lead):
         Segment: {segment_name}. No sales jargon. Offer value or market insight."""
 
         response = ai_client.models.generate_content(
-            model="gemini-3-flash",
+            model="gemini-1.5-flash",
             contents=prompt
         )
         return response.text.strip() if response.text else "Checking in on your property value."
